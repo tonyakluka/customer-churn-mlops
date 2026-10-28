@@ -21,15 +21,18 @@ customer-churn-mlops/
 │       ├── churn_v1.csv          # версія даних v1
 │       └── churn_v1_metadata.json
 ├── models/                       # збережені моделі (не в Git)
+├── mlruns/                       # артефакти MLflow (не в Git)
+├── mlflow.db                     # база MLflow: runs, параметри, метрики, реєстр (не в Git)
 ├── notebooks/
 ├── reports/
 │   ├── data_validation_report.json
-│   └── baseline_metrics.json
+│   ├── latest_metrics.json       # метрики останнього запуску
+│   └── model_selection.md        # вибір найкращої моделі
 ├── src/
 │   ├── data_preparation.py
 │   ├── validate_data.py          # валідація даних
 │   ├── version_data.py           # версіонування даних
-│   └── train.py                  # навчання моделі
+│   └── train.py                  # навчання + логування в MLflow
 ├── tests/
 ├── README.md
 └── requirements.txt
@@ -47,50 +50,65 @@ pip install -r requirements.txt
 ```bash
 python src/validate_data.py
 python src/version_data.py
-python src/train.py
+python src/train.py --model-type logistic_regression
+python src/train.py --model-type random_forest
 ```
 
 ## Валідація даних
 Скрипт `src/validate_data.py` перевіряє сирі дані за схемою `configs/data_schema.yaml`:
-- наявність обов'язкових колонок;
-- дублікати рядків;
-- частку пропущених значень (не більше 20%);
-- допустимі значення цільової змінної `Churn` (`Yes` / `No`);
-- коректність числових колонок (`tenure`, `MonthlyCharges`, `TotalCharges`).
+наявність обов'язкових колонок, дублікати, частку пропусків (не більше 20%),
+допустимі значення `Churn` (`Yes` / `No`) та коректність числових колонок.
+Звіт: `reports/data_validation_report.json`.
 
-Звіт зберігається у `reports/data_validation_report.json`.
-
-**Статус:**
 - `passed` — критичних помилок немає, дані можна використовувати для навчання;
-- `failed` — знайдено помилки (`errors`), скрипт завершується з кодом 1, і навчання запускати не можна.
-
-Попередження (`warnings`) не зупиняють пайплайн, але на них варто звернути увагу.
-Поточний результат: `passed`, попередження — 11 порожніх значень у `TotalCharges`.
+- `failed` — знайдено помилки (`errors`), скрипт завершується з кодом 1.
 
 ## Версіонування даних
-Скрипт `src/version_data.py` створює версію даних **v1**:
-- порожні `TotalCharges` замінюються на 0;
-- видаляються дублікати;
-- результат зберігається у `data/processed/churn_v1.csv`;
-- метадані (версія, дата, кількість рядків, SHA-256 хеші вхідного та вихідного файлів) — у `data/processed/churn_v1_metadata.json`.
+Скрипт `src/version_data.py` створює версію даних **v1** (`data/processed/churn_v1.csv`)
+та метадані з SHA-256 хешами (`data/processed/churn_v1_metadata.json`).
 
-## Модель
-`StandardScaler → LogisticRegression(max_iter=2000)`, поділ 80/20 зі стратифікацією, `random_state=42`.
-Модель навчається на версії даних **v1** (`data/processed/churn_v1.csv`), версія записується в метрики.
+## Відстеження експериментів (MLflow)
 
-## Отримані метрики (data_version: v1)
-| Метрика   | Значення |
-|-----------|----------|
-| accuracy  | 0.807 |
-| precision | 0.658 |
-| recall    | 0.567 |
-| f1        | 0.609 |
-| roc_auc   | 0.842 |
+### Запуск MLflow UI
+В окремому терміналі (сервер має працювати весь час):
+```bash
+mlflow ui --host 127.0.0.1 --port 5000
+```
+Відкрити у браузері: http://127.0.0.1:5000 (режим **Model training**).
+
+### Навчання з логуванням
+```bash
+python src/train.py --model-type logistic_regression
+python src/train.py --model-type random_forest
+```
+Кожен запуск створює run в експерименті `customer-churn-baseline` і логує:
+- параметри: `model_type`, `data_version`, `test_size`, `random_state`;
+- метрики: `accuracy`, `precision`, `recall`, `f1`, `roc_auc`;
+- артефакт: `reports/latest_metrics.json`;
+- модель, яка реєструється в Model Registry як `CustomerChurnClassifier`.
+
+### Де зберігаються дані MLflow
+- `mlflow.db` — база SQLite: експерименти, runs, параметри, метрики та Model Registry
+  (MLflow 3.x використовує її за замовчуванням);
+- `mlruns/` — артефакти запусків (файли звітів і моделей).
+
+Обидва шляхи додано в `.gitignore`.
+
+### Як переглянути Model Registry
+У MLflow UI: **Model registry** → `CustomerChurnClassifier`.
+Там видно всі версії моделі; актуальна модель позначена alias **@champion**.
+
+## Моделі та результати (data_version: v1)
+| Run | accuracy | precision | recall | f1 | roc_auc | Версія в реєстрі |
+|-----|----------|-----------|--------|----|---------|------------------|
+| logistic_regression_v1 | 0.805 | 0.654 | 0.561 | 0.604 | 0.843 | Version 1 **@champion** |
+| random_forest_v1 | 0.785 | 0.618 | 0.497 | 0.551 | 0.825 | Version 2 |
+
+Основна метрика — **recall**. Обрано логістичну регресію. Обґрунтування: `reports/model_selection.md`.
 
 ## Висновок
-Додано валідацію даних і версіонування датасету. Перевірка сирих даних за схемою
-`configs/data_schema.yaml` завершилась зі статусом `passed` (7043 рядки, 0 дублікатів,
-попередження — 11 порожніх значень у `TotalCharges`). Створено версію даних `v1` з метаданими
-та SHA-256 хешами, і модель тепер навчається саме на ній, а версія даних записується в метрики.
-Якість моделі не змінилась (accuracy 0.807, ROC-AUC 0.842), але тепер для кожного результату
-відомо, на якій версії даних його отримано, що забезпечує відтворюваність.
+Додано відстеження експериментів за допомогою MLflow: параметри, метрики, артефакти та моделі
+кожного запуску зберігаються автоматично і порівнюються в MLflow UI. Проведено два експерименти
+на версії даних v1. За основною метрикою recall найкращою виявилась логістична регресія
+(recall 0.561, ROC-AUC 0.843), яку зареєстровано в Model Registry як `CustomerChurnClassifier`
+Version 1 з alias `@champion`.

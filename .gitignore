@@ -5,3 +5,7 @@ models/*.joblib
 .env
 .DS_Store
 .idea/
+mlruns/
+mlartifacts/
+mlflow.db
+models/
